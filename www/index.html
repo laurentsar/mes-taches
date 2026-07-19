@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#141b2e" />
+  <title>Mes Tâches</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="img/icon-192.png" />
+  <link rel="apple-touch-icon" href="img/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+      <defs>
+        <linearGradient id="lgCard" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#7dd3fc"/><stop offset="100%" stop-color="#4f8cf7"/>
+        </linearGradient>
+      </defs>
+      <rect x="10" y="8" width="44" height="48" rx="8" fill="url(#lgCard)"/>
+      <rect x="24" y="4" width="16" height="10" rx="4" fill="#1e293b" opacity=".55"/>
+      <path d="M20 28l6 6 14-14" stroke="#0b1220" stroke-width="5" fill="none"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M20 44h18" stroke="#0b1220" stroke-width="5" fill="none" stroke-linecap="round" opacity=".45"/>
+    </svg>
+    <div class="brand-txt">
+      <h1>Mes Tâches <span id="verChip" class="ver-chip"></span></h1>
+      <p class="sub" id="subLine">Ce qu'il y a à faire, et quand</p>
+    </div>
+  </div>
+  <button id="haDot" class="ha-dot" title="Home Assistant">🏠</button>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="today">☀️ Aujourd'hui</button>
+  <button class="tab" data-tab="all">📋 Toutes</button>
+  <button class="tab" data-tab="proj">🧱 Projets</button>
+  <button class="tab" data-tab="set">⚙️</button>
+</nav>
+
+<!-- =========================== AUJOURD'HUI =========================== -->
+<section id="tab-today" class="tab-panel active">
+  <div id="todayHead"></div>
+  <div id="todayList"></div>
+  <div id="soonBlock"></div>
+</section>
+
+<!-- ============================= TOUTES ============================== -->
+<section id="tab-all" class="tab-panel">
+  <div class="filters">
+    <input type="search" id="search" placeholder="Rechercher…" />
+    <select id="filterCat"><option value="">Toutes catégories</option></select>
+    <select id="filterState">
+      <option value="active">À faire</option>
+      <option value="late">En retard</option>
+      <option value="recur">Récurrentes</option>
+      <option value="done">Terminées</option>
+      <option value="all">Tout</option>
+    </select>
+  </div>
+  <div id="allList"></div>
+</section>
+
+<!-- ============================= PROJETS ============================= -->
+<section id="tab-proj" class="tab-panel">
+  <p class="muted small">Une tâche devient un projet dès qu'on lui ajoute des étapes.</p>
+  <div id="projList"></div>
+</section>
+
+<!-- =========================== RÉGLAGES ============================== -->
+<section id="tab-set" class="tab-panel">
+  <h2>Rappels</h2>
+  <div class="card">
+    <label class="chk"><input type="checkbox" id="setNotif" /> <span>Rappel quotidien sur le téléphone</span></label>
+    <label class="fld"><span>Heure du rappel</span><input type="time" id="setNotifHour" value="08:00" /></label>
+    <label class="chk"><input type="checkbox" id="setNotifLate" /> <span>Prévenir dès qu'une tâche passe en retard</span></label>
+    <div class="row-btns">
+      <button id="btnTestNotif" class="ghost">🔔 Tester une notification</button>
+    </div>
+  </div>
+
+  <h2>Home Assistant</h2>
+  <div class="card">
+    <p class="muted small">Publie les tâches du jour, celles en retard et l'avancement des projets comme capteurs <code>sensor.taches_*</code>.</p>
+    <label class="fld"><span>URL</span><input type="text" id="haUrl" placeholder="http://192.168.1.172:8123" /></label>
+    <label class="fld"><span>Jeton longue durée</span><input type="password" id="haToken" placeholder="eyJhbGciOi…" /></label>
+    <label class="chk"><input type="checkbox" id="haAuto" /> <span>Publier automatiquement à chaque changement</span></label>
+    <div class="row-btns">
+      <button id="haTest" class="ghost">🔌 Tester la connexion</button>
+      <button id="haPush" class="ghost">⬆︎ Publier maintenant</button>
+    </div>
+    <p id="haMsg" class="msg"></p>
+    <details class="help">
+      <summary>Afficher les tâches sur un dashboard</summary>
+      <pre>type: markdown
+content: |
+  ## {{ state_attr('sensor.taches_aujourdhui','resume') }}
+  {% for l in state_attr('sensor.taches_aujourdhui','liste') or [] %}
+  - {{ l }}
+  {% endfor %}</pre>
+      <p class="small">Si ton <code>recorder</code> est en liste blanche, ajoute <code>sensor.taches_*</code> à <code>recorder.include</code> pour garder l'historique.</p>
+    </details>
+  </div>
+
+  <h2>Sauvegarde</h2>
+  <div class="card">
+    <p class="muted small">Tout est stocké sur le téléphone — et <strong>une désinstallation efface tout</strong>. La sauvegarde va dans Home Assistant, lui-même sauvegardé vers ton NAS.</p>
+    <label class="chk"><input type="checkbox" id="setBackup" /> <span>Sauvegarde automatique vers Home Assistant</span></label>
+    <div class="row-btns">
+      <button id="btnBackupNow" class="ghost">☁︎ Sauvegarder maintenant</button>
+      <button id="btnRestore" class="ghost">⟲ Restaurer</button>
+    </div>
+    <p id="backupMsg" class="muted small"></p>
+    <div class="row-btns">
+      <button id="btnExport" class="ghost">⬇︎ Exporter</button>
+      <label class="ghost file-btn">⬆︎ Importer<input type="file" id="fileImport" accept="application/json" hidden /></label>
+      <button id="btnWipe" class="ghost danger">🗑 Tout effacer</button>
+    </div>
+  </div>
+
+  <h2>Modèles</h2>
+  <div class="card">
+    <p class="muted small">Tâches d'entretien courantes, à ajouter d'un geste. Les échéances partent d'aujourd'hui.</p>
+    <div id="templates"></div>
+  </div>
+
+  <h2>À propos</h2>
+  <div class="card">
+    <p class="small muted" id="aboutVer"></p>
+  </div>
+</section>
+
+<button id="fab" class="fab" title="Nouvelle tâche">＋</button>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="modalTitle"></h3>
+    <div id="modalBody"></div>
+    <div class="row-btns end">
+      <button id="modalCancel" class="ghost">Annuler</button>
+      <button id="modalOk" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script>window.UPDATE_REPO = 'laurentsar/mes-taches';</script>
+<script src="js/model.js"></script>
+<script src="js/ha.js"></script>
+<script src="app.js"></script>
+<script src="update-check.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js'); });
+  }
+</script>
+</body>
+</html>

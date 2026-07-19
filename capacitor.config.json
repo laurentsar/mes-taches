@@ -1,0 +1,7 @@
+{
+  "appId": "com.laurent.taches",
+  "appName": "Mes Tâches",
+  "webDir": "www",
+  "android": { "allowMixedContent": true },
+  "plugins": { "CapacitorHttp": { "enabled": true } }
+}

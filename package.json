@@ -1,0 +1,13 @@
+{
+  "name": "mes-taches",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gestion de tâches : entretien récurrent, listes, projets à étapes et rappels datés, avec publication vers Home Assistant",
+  "scripts": { "sync": "cap sync android", "open": "cap open android" },
+  "dependencies": {
+    "@capacitor/android": "^6.2.1",
+    "@capacitor/cli": "^6.2.1",
+    "@capacitor/core": "^6.2.1",
+    "@capacitor/local-notifications": "^6.1.0"
+  }
+}
