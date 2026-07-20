@@ -14,9 +14,11 @@
       notif: false, notifHour: '08:00', notifLate: true,
       haAuto: true, backup: true,
       timerDefaults: { charge: 5, piscine: 40 },
+      pomodoro: { work: 25, brk: 5 },
     },
     tasks: [], lastBackup: null, lastNotifDay: null,
     timers: { charge: null, piscine: null },
+    pomodoro: null,
   };
 
   var S = load();
@@ -137,6 +139,7 @@
 
   function renderToday() {
     renderTimers();
+    renderPomodoro();
     var jour = M.forToday(S.tasks);
     var retard = M.late(S.tasks);
 
@@ -741,6 +744,174 @@
   }
 
   /* ================================================================== */
+  /* Pomodoro (révisions) : alterne travail / pause indéfiniment         */
+  /* ================================================================== */
+
+  var POMO_CHANNEL_ID = 'pomodoro';
+  var POMO_NOTIF_BASE_ID = 3200;
+  var POMO_SCHEDULE_COUNT = 16; /* couvre plusieurs heures de révision d'affilée */
+  var pomoWebTimer = null;
+
+  function ensurePomodoroChannel() {
+    var p = notifPlugin();
+    if (!p || !p.createChannel) return;
+    p.createChannel({
+      id: POMO_CHANNEL_ID,
+      name: 'Pomodoro',
+      description: 'Alerte à chaque bascule travail / pause',
+      importance: 5,
+      visibility: 1,
+      vibration: true,
+    }).catch(function () {});
+  }
+
+  /* Séquence travail/pause/travail/pause… indexée depuis le début de la
+     session : phase paire = travail, impaire = pause. Bornes calculées
+     analytiquement (pas de boucle) pour retomber juste après une longue
+     absence de l'app. */
+  function pomoPhaseBounds(pom, i) {
+    var pairLen = pom.work + pom.brk;
+    var k = Math.floor(i / 2);
+    var isWork = i % 2 === 0;
+    var startMin = isWork ? k * pairLen : k * pairLen + pom.work;
+    var endMin = isWork ? k * pairLen + pom.work : (k + 1) * pairLen;
+    return { phase: isWork ? 'work' : 'break', startMin: startMin, endMin: endMin, session: k + 1 };
+  }
+
+  function pomoState(pom, atMs) {
+    var startMs = new Date(pom.start).getTime();
+    var elapsedMin = Math.max(0, (atMs - startMs) / 60000);
+    var pairLen = pom.work + pom.brk;
+    var k = Math.floor(elapsedMin / pairLen);
+    var withinPair = elapsedMin - k * pairLen;
+    var i = k * 2 + (withinPair < pom.work ? 0 : 1);
+    var b = pomoPhaseBounds(pom, i);
+    var phaseEndMs = startMs + b.endMin * 60000;
+    return { index: i, phase: b.phase, session: b.session, phaseEndMs: phaseEndMs, remainingMs: phaseEndMs - atMs };
+  }
+
+  /* Reprogramme les prochaines bascules à partir de maintenant. Rappelé au
+     démarrage et à chaque retour au premier plan, pour que les alertes
+     restent programmées même si le téléphone reste verrouillé longtemps. */
+  function schedulePomodoroAlarms(pom) {
+    cancelPomodoroAlarms();
+    var startMs = new Date(pom.start).getTime();
+    var cur = pomoState(pom, Date.now());
+    var notifs = [];
+    for (var n = 0; n < POMO_SCHEDULE_COUNT; n++) {
+      var b = pomoPhaseBounds(pom, cur.index + n);
+      var endingWork = b.phase === 'work';
+      notifs.push({
+        id: POMO_NOTIF_BASE_ID + n,
+        title: '🍅 Pomodoro',
+        body: endingWork ? ('Session terminée — pause de ' + pom.brk + ' min !') : 'Pause terminée — au travail !',
+        channelId: POMO_CHANNEL_ID,
+        schedule: { at: new Date(startMs + b.endMin * 60000) },
+      });
+    }
+    var p = notifPlugin();
+    if (p) {
+      p.schedule({ notifications: notifs }).catch(function () {});
+    } else if ('Notification' in window) {
+      clearTimeout(pomoWebTimer);
+      var first = notifs[0];
+      pomoWebTimer = setTimeout(function () {
+        new Notification(first.title, { body: first.body });
+        if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+      }, Math.max(0, first.schedule.at.getTime() - Date.now()));
+    }
+  }
+
+  function cancelPomodoroAlarms() {
+    var p = notifPlugin();
+    if (p) {
+      var ids = [];
+      for (var n = 0; n < POMO_SCHEDULE_COUNT; n++) ids.push({ id: POMO_NOTIF_BASE_ID + n });
+      p.cancel({ notifications: ids }).catch(function () {});
+    }
+    clearTimeout(pomoWebTimer);
+  }
+
+  function startPomodoro(workMin, brkMin) {
+    workMin = Math.min(180, Math.max(1, workMin));
+    brkMin = Math.min(60, Math.max(1, brkMin));
+    askNotifPermission().then(function (ok) {
+      if (!ok) { toast('Notifications refusées par le système'); return; }
+      S.settings.pomodoro = { work: workMin, brk: brkMin };
+      S.pomodoro = { start: new Date().toISOString(), work: workMin, brk: brkMin };
+      save();
+      schedulePomodoroAlarms(S.pomodoro);
+      renderPomodoro();
+      toast('Pomodoro lancé — ' + workMin + ' min de travail');
+    });
+  }
+
+  function stopPomodoro() {
+    S.pomodoro = null;
+    save();
+    cancelPomodoroAlarms();
+    renderPomodoro();
+    toast('Pomodoro arrêté');
+  }
+
+  function renderPomodoro() {
+    var host = $('timer-pomodoro');
+    if (!host) return;
+    var pom = S.pomodoro;
+
+    if (pom) {
+      var st = pomoState(pom, Date.now());
+      var isWork = st.phase === 'work';
+      host.innerHTML =
+        '<div class="fill-head"><div class="timer-head">' +
+        '<span class="timer-badge timer-badge-pomodoro">🍅</span>' +
+        '<h3>' + (isWork ? 'Travail' : 'Pause') + ' — session ' + st.session + '</h3></div>' +
+        '<span class="fill-time">' + fmtRemain(Math.max(0, st.remainingMs)) + '</span></div>' +
+        '<p class="muted small">' + (isWork ? '📚 Concentre-toi' : '☕ Petite pause') + ' — bascule à ' +
+        esc(new Date(st.phaseEndMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })) + '</p>';
+      var stopBtn = el('button', 'ghost danger wide', '✕ Arrêter le pomodoro');
+      stopBtn.onclick = function () { stopPomodoro(); };
+      host.appendChild(stopBtn);
+      return;
+    }
+
+    host.innerHTML = '<div class="timer-head"><span class="timer-badge timer-badge-pomodoro">🍅</span>' +
+      '<h3>Pomodoro (révisions)</h3></div>' +
+      '<p class="muted small">Alterne travail et pause, avec vibration et notification à chaque bascule.</p>';
+
+    var def = S.settings.pomodoro;
+    var row = el('div', 'grid2');
+    var f1 = el('label', 'fld', '<span>Travail (min)</span>');
+    var workInput = el('input');
+    workInput.type = 'number'; workInput.min = '1'; workInput.max = '180'; workInput.inputMode = 'numeric';
+    workInput.value = def.work;
+    f1.appendChild(workInput); row.appendChild(f1);
+    var f2 = el('label', 'fld', '<span>Pause (min)</span>');
+    var brkInput = el('input');
+    brkInput.type = 'number'; brkInput.min = '1'; brkInput.max = '60'; brkInput.inputMode = 'numeric';
+    brkInput.value = def.brk;
+    f2.appendChild(brkInput); row.appendChild(f2);
+    host.appendChild(row);
+
+    var presets = el('div', 'row-btns');
+    [[25, 5], [50, 10], [15, 3]].forEach(function (pr) {
+      var b = el('button', 'ghost small-btn', pr[0] + ' / ' + pr[1]);
+      b.type = 'button';
+      b.onclick = function () { workInput.value = pr[0]; brkInput.value = pr[1]; };
+      presets.appendChild(b);
+    });
+    host.appendChild(presets);
+
+    var startBtn = el('button', 'primary wide', '▶️ Démarrer');
+    startBtn.onclick = function () {
+      var w = parseInt(workInput.value, 10), b = parseInt(brkInput.value, 10);
+      if (!w || w <= 0 || !b || b <= 0) { toast('Indique des durées valides'); return; }
+      startPomodoro(w, b);
+    };
+    host.appendChild(startBtn);
+  }
+
+  /* ================================================================== */
   /* Sauvegarde / export                                                */
   /* ================================================================== */
 
@@ -956,11 +1127,20 @@
     });
     setInterval(function () {
       if (TIMERS.some(function (def) { return S.timers[def.id]; })) renderTimers();
+      if (S.pomodoro) renderPomodoro();
     }, 30000);
 
-    /* Au retour dans l'app, un jour a pu passer : les échéances bougent. */
+    ensurePomodoroChannel();
+    if (S.pomodoro) schedulePomodoroAlarms(S.pomodoro);
+
+    /* Au retour dans l'app, un jour a pu passer : les échéances bougent, et
+       le pomodoro doit reprogrammer ses prochaines bascules pour couvrir la
+       suite de la session. */
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible') renderAll();
+      if (document.visibilityState === 'visible') {
+        renderAll();
+        if (S.pomodoro) schedulePomodoroAlarms(S.pomodoro);
+      }
     });
   }
 

@@ -1,4 +1,4 @@
 {
   "version": "1.1.0",
-  "notes": "Ajout d'une minuterie de remplissage de la piscine (40 min par défaut), en plus de la recharge voiture. Durée réglable pour les deux."
+  "notes": "Ajout d'un Pomodoro pour les révisions (travail/pause alternés, vibration et notification à chaque bascule), en plus des minuteries de recharge voiture et de remplissage piscine."
 }

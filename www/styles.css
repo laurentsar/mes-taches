@@ -303,6 +303,7 @@ h4{margin:14px 0 6px;font-size:14px;color:var(--muted)}
   box-shadow:0 3px 10px rgba(0,0,0,.35)}
 .timer-badge-charge{background:linear-gradient(135deg,#fde68a,#f59e0b)}
 .timer-badge-piscine{background:linear-gradient(135deg,#7dd3fc,#0ea5b7)}
+.timer-badge-pomodoro{background:linear-gradient(135deg,#fca5a5,#ef4444)}
 
 /* Petit clin d'œil : le badge d'une minuterie active respire doucement. */
 @keyframes timer-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
