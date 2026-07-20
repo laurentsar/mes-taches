@@ -291,3 +291,8 @@ button.ghost.wide{width:100%}
 
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 h4{margin:14px 0 6px;font-size:14px;color:var(--muted)}
+
+/* Minuterie de recharge de la voiture. */
+.charge-card{border-left:3px solid var(--mint)}
+.charge-card h3{font-size:15px}
+.charge-card .fill-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}

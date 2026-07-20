@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.0.0';
+  var APP_VERSION = '1.1.0';
   window.APP_VERSION = APP_VERSION;
 
   var KEY = 'taches.state';
@@ -14,7 +14,7 @@
       notif: false, notifHour: '08:00', notifLate: true,
       haAuto: true, backup: true,
     },
-    tasks: [], lastBackup: null, lastNotifDay: null,
+    tasks: [], lastBackup: null, lastNotifDay: null, charge: null,
   };
 
   var S = load();
@@ -126,6 +126,7 @@
   /* ================================================================== */
 
   function renderToday() {
+    renderCharge();
     var jour = M.forToday(S.tasks);
     var retard = M.late(S.tasks);
 
@@ -534,6 +535,109 @@
   }
 
   /* ================================================================== */
+  /* Minuterie de recharge de la voiture                                */
+  /* ================================================================== */
+
+  var CHARGE_NOTIF_ID = 3001;
+  var CHARGE_CHANNEL_ID = 'recharge';
+  var chargeWebTimer = null;
+
+  /* Canal Android dédié, avec vibration : sans ça la notification par
+     défaut peut rester silencieuse selon les réglages du téléphone. */
+  function ensureChargeChannel() {
+    var p = notifPlugin();
+    if (!p || !p.createChannel) return;
+    p.createChannel({
+      id: CHARGE_CHANNEL_ID,
+      name: 'Recharge voiture',
+      description: 'Alerte de fin de recharge de la voiture',
+      importance: 5,
+      visibility: 1,
+      vibration: true,
+    }).catch(function () {});
+  }
+
+  function scheduleChargeAlarm(end) {
+    var p = notifPlugin();
+    if (p) {
+      p.cancel({ notifications: [{ id: CHARGE_NOTIF_ID }] }).catch(function () {});
+      p.schedule({
+        notifications: [{
+          id: CHARGE_NOTIF_ID,
+          title: '🔌 Recharge terminée',
+          body: 'La voiture a fini de charger.',
+          channelId: CHARGE_CHANNEL_ID,
+          schedule: { at: end },
+        }],
+      }).catch(function () {});
+    } else if ('Notification' in window) {
+      clearTimeout(chargeWebTimer);
+      chargeWebTimer = setTimeout(function () {
+        new Notification('🔌 Recharge terminée', { body: 'La voiture a fini de charger.' });
+        if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+      }, Math.max(0, end.getTime() - Date.now()));
+    }
+  }
+
+  function cancelChargeAlarm() {
+    var p = notifPlugin();
+    if (p) p.cancel({ notifications: [{ id: CHARGE_NOTIF_ID }] }).catch(function () {});
+    clearTimeout(chargeWebTimer);
+  }
+
+  function startCharge(hours) {
+    askNotifPermission().then(function (ok) {
+      if (!ok) { toast('Notifications refusées par le système'); return; }
+      var end = new Date(Date.now() + hours * 3600000);
+      S.charge = { end: end.toISOString() };
+      save();
+      scheduleChargeAlarm(end);
+      renderCharge();
+      toast('Minuterie lancée — fin à ' + end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
+    });
+  }
+
+  function cancelCharge() {
+    S.charge = null;
+    save();
+    cancelChargeAlarm();
+    renderCharge();
+    toast('Minuterie annulée');
+  }
+
+  function renderCharge() {
+    var host = $('chargeCard');
+    if (!host) return;
+
+    if (S.charge && S.charge.end) {
+      var end = new Date(S.charge.end);
+      var rem = end.getTime() - Date.now();
+      if (rem <= 0) {
+        S.charge = null;
+        save();
+      } else {
+        var h = Math.floor(rem / 3600000);
+        var m = Math.floor((rem % 3600000) / 60000);
+        host.innerHTML =
+          '<div class="fill-head"><h3>🔌 Recharge en cours</h3>' +
+          '<span class="fill-time">' + h + ' h ' + (m < 10 ? '0' : '') + m + '</span></div>' +
+          '<p class="muted small">Fin prévue à ' +
+          esc(end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })) + '</p>';
+        var cancelBtn = el('button', 'ghost danger wide', '✕ Annuler la minuterie');
+        cancelBtn.onclick = function () { cancelCharge(); };
+        host.appendChild(cancelBtn);
+        return;
+      }
+    }
+
+    host.innerHTML = '<h3>🔌 Recharge de la voiture</h3>' +
+      '<p class="muted small">Lance une minuterie de 5 heures : vibration et notification à la fin.</p>';
+    var startBtn = el('button', 'primary wide', '▶️ Démarrer (5 h)');
+    startBtn.onclick = function () { startCharge(5); };
+    host.appendChild(startBtn);
+  }
+
+  /* ================================================================== */
   /* Sauvegarde / export                                                */
   /* ================================================================== */
 
@@ -737,6 +841,15 @@
     }
 
     if (S.settings.notif) scheduleReminders();
+
+    ensureChargeChannel();
+    /* La notification est déjà programmée côté OS, mais on la reprogramme
+       ici pour couvrir le cas d'une restauration/import ramenant une
+       recharge en cours sur un appareil où le canal vient d'être créé. */
+    if (S.charge && S.charge.end && new Date(S.charge.end) > new Date()) {
+      scheduleChargeAlarm(new Date(S.charge.end));
+    }
+    setInterval(function () { if (S.charge) renderCharge(); }, 30000);
 
     /* Au retour dans l'app, un jour a pu passer : les échéances bougent. */
     document.addEventListener('visibilitychange', function () {
