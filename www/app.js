@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.0.0';
+  var APP_VERSION = '1.1.0';
   window.APP_VERSION = APP_VERSION;
 
   var KEY = 'taches.state';
@@ -13,8 +13,12 @@
     settings: {
       notif: false, notifHour: '08:00', notifLate: true,
       haAuto: true, backup: true,
+      timerDefaults: { charge: 5, piscine: 40 },
+      pomodoro: { work: 25, brk: 5 },
     },
     tasks: [], lastBackup: null, lastNotifDay: null,
+    timers: { charge: null, piscine: null },
+    pomodoro: null,
   };
 
   var S = load();
@@ -27,9 +31,17 @@
     var out = JSON.parse(JSON.stringify(DEFAULTS));
     Object.keys(out).forEach(function (k) {
       if (s[k] == null) return;
-      if (k === 'settings') Object.keys(s.settings || {}).forEach(function (n) { out.settings[n] = s.settings[n]; });
+      if (k === 'settings') Object.keys(s.settings || {}).forEach(function (n) {
+        if (n === 'timerDefaults') Object.keys(s.settings.timerDefaults || {}).forEach(function (t) {
+          out.settings.timerDefaults[t] = s.settings.timerDefaults[t];
+        });
+        else out.settings[n] = s.settings[n];
+      });
       else out[k] = s[k];
     });
+    /* Migration depuis la version à minuterie unique (recharge voiture). */
+    if (s.settings && s.settings.chargeHours != null) out.settings.timerDefaults.charge = s.settings.chargeHours;
+    if (s.charge) out.timers.charge = s.charge;
     return out;
   }
 
@@ -126,6 +138,8 @@
   /* ================================================================== */
 
   function renderToday() {
+    renderTimers();
+    renderPomodoro();
     var jour = M.forToday(S.tasks);
     var retard = M.late(S.tasks);
 
@@ -534,6 +548,370 @@
   }
 
   /* ================================================================== */
+  /* Minuteries (recharge voiture, remplissage piscine…)                */
+  /* ================================================================== */
+
+  /* unit 'h' = durée en heures, 'm' = durée en minutes. adjustStep en
+     minutes, utilisé pour les boutons ±. */
+  var TIMERS = [
+    {
+      id: 'charge', icon: '🔌', title: 'Recharge de la voiture',
+      unit: 'h', unitLabel: 'heures', min: 0.5, max: 24, step: 0.5, presets: [2, 5, 8],
+      adjustStep: 30, notifId: 3001, channelId: 'recharge',
+      notifTitle: '🔌 Recharge terminée', notifBody: 'La voiture a fini de charger.',
+    },
+    {
+      id: 'piscine', icon: '🏊', title: 'Remplissage de la piscine',
+      unit: 'm', unitLabel: 'minutes', min: 5, max: 300, step: 5, presets: [20, 40, 60],
+      adjustStep: 10, notifId: 3002, channelId: 'remplissage',
+      notifTitle: '🏊 Remplissage terminé', notifBody: 'Le remplissage de la piscine est terminé.',
+    },
+  ];
+  var timerWebTimers = {};
+
+  function unitMs(def) { return def.unit === 'h' ? 3600000 : 60000; }
+
+  /* Canaux Android dédiés, avec vibration : sans ça la notification par
+     défaut peut rester silencieuse selon les réglages du téléphone. */
+  function ensureTimerChannels() {
+    var p = notifPlugin();
+    if (!p || !p.createChannel) return;
+    TIMERS.forEach(function (def) {
+      p.createChannel({
+        id: def.channelId,
+        name: def.title,
+        description: 'Alerte de fin — ' + def.title,
+        importance: 5,
+        visibility: 1,
+        vibration: true,
+      }).catch(function () {});
+    });
+  }
+
+  function scheduleTimerAlarm(def, end) {
+    var p = notifPlugin();
+    if (p) {
+      p.cancel({ notifications: [{ id: def.notifId }] }).catch(function () {});
+      p.schedule({
+        notifications: [{
+          id: def.notifId,
+          title: def.notifTitle,
+          body: def.notifBody,
+          channelId: def.channelId,
+          schedule: { at: end },
+        }],
+      }).catch(function () {});
+    } else if ('Notification' in window) {
+      clearTimeout(timerWebTimers[def.id]);
+      timerWebTimers[def.id] = setTimeout(function () {
+        new Notification(def.notifTitle, { body: def.notifBody });
+        if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+      }, Math.max(0, end.getTime() - Date.now()));
+    }
+  }
+
+  function cancelTimerAlarm(def) {
+    var p = notifPlugin();
+    if (p) p.cancel({ notifications: [{ id: def.notifId }] }).catch(function () {});
+    clearTimeout(timerWebTimers[def.id]);
+  }
+
+  function startTimer(def, amount) {
+    amount = Math.min(def.max, Math.max(def.min, amount));
+    askNotifPermission().then(function (ok) {
+      if (!ok) { toast('Notifications refusées par le système'); return; }
+      S.settings.timerDefaults[def.id] = amount;
+      var end = new Date(Date.now() + amount * unitMs(def));
+      S.timers[def.id] = { end: end.toISOString() };
+      save();
+      scheduleTimerAlarm(def, end);
+      renderTimers();
+      toast('Minuterie lancée — fin à ' + end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
+    });
+  }
+
+  function cancelTimer(def) {
+    S.timers[def.id] = null;
+    save();
+    cancelTimerAlarm(def);
+    renderTimers();
+    toast('Minuterie annulée');
+  }
+
+  /* Ajuste le temps restant d'une minuterie en cours, sans repartir de zéro. */
+  function adjustTimer(def, minutes) {
+    var t = S.timers[def.id];
+    if (!t || !t.end) return;
+    var end = new Date(new Date(t.end).getTime() + minutes * 60000);
+    var floor = new Date(Date.now() + 60000);
+    if (end < floor) end = floor;
+    t.end = end.toISOString();
+    save();
+    scheduleTimerAlarm(def, end);
+    renderTimers();
+  }
+
+  function fmtRemain(ms) {
+    var h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    return h > 0 ? (h + ' h ' + (m < 10 ? '0' : '') + m) : (m + ' min');
+  }
+
+  function renderTimer(def) {
+    var host = $('timer-' + def.id);
+    if (!host) return;
+    var t = S.timers[def.id];
+
+    if (t && t.end) {
+      var end = new Date(t.end);
+      var rem = end.getTime() - Date.now();
+      if (rem <= 0) {
+        S.timers[def.id] = null;
+        save();
+      } else {
+        host.innerHTML =
+          '<div class="fill-head"><div class="timer-head">' +
+          '<span class="timer-badge timer-badge-' + esc(def.id) + '">' + esc(def.icon) + '</span>' +
+          '<h3>' + esc(def.title) + ' — en cours</h3></div>' +
+          '<span class="fill-time">' + fmtRemain(rem) + '</span></div>' +
+          '<p class="muted small">Fin prévue à ' +
+          esc(end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })) + '</p>';
+
+        var adjRow = el('div', 'row-btns');
+        [['−' + def.adjustStep + ' min', -def.adjustStep], ['+' + def.adjustStep + ' min', def.adjustStep]]
+          .forEach(function (b) {
+            var btn = el('button', 'ghost small-btn', b[0]);
+            btn.type = 'button';
+            btn.onclick = function () { adjustTimer(def, b[1]); };
+            adjRow.appendChild(btn);
+          });
+        host.appendChild(adjRow);
+
+        var cancelBtn = el('button', 'ghost danger wide', '✕ Annuler la minuterie');
+        cancelBtn.onclick = function () { cancelTimer(def); };
+        host.appendChild(cancelBtn);
+        return;
+      }
+    }
+
+    host.innerHTML = '<div class="timer-head">' +
+      '<span class="timer-badge timer-badge-' + esc(def.id) + '">' + esc(def.icon) + '</span>' +
+      '<h3>' + esc(def.title) + '</h3></div>' +
+      '<p class="muted small">Choisis la durée : vibration et notification à la fin.</p>';
+
+    var durRow = el('span', 'fld-row');
+    var durInput = el('input');
+    durInput.type = 'number';
+    durInput.min = String(def.min);
+    durInput.max = String(def.max);
+    durInput.step = String(def.step);
+    durInput.inputMode = 'decimal';
+    durInput.value = S.settings.timerDefaults[def.id];
+    durRow.appendChild(durInput);
+    durRow.appendChild(el('span', 'muted small', def.unitLabel));
+    var durFld = el('label', 'fld', '');
+    durFld.appendChild(durRow);
+    host.appendChild(durFld);
+
+    var presets = el('div', 'row-btns');
+    def.presets.forEach(function (v) {
+      var b = el('button', 'ghost small-btn', v + (def.unit === 'h' ? ' h' : ' min'));
+      b.type = 'button';
+      b.onclick = function () { durInput.value = v; };
+      presets.appendChild(b);
+    });
+    host.appendChild(presets);
+
+    var startBtn = el('button', 'primary wide', '▶️ Démarrer');
+    startBtn.onclick = function () {
+      var amount = parseFloat(durInput.value);
+      if (!amount || amount <= 0) { toast('Indique une durée valide'); return; }
+      startTimer(def, amount);
+    };
+    host.appendChild(startBtn);
+  }
+
+  function renderTimers() {
+    var host = $('timersHost');
+    if (!host) return;
+    if (!host.childElementCount) {
+      TIMERS.forEach(function (def) {
+        var card = el('div', 'card timer-card');
+        card.id = 'timer-' + def.id;
+        host.appendChild(card);
+      });
+    }
+    TIMERS.forEach(renderTimer);
+  }
+
+  /* ================================================================== */
+  /* Pomodoro (révisions) : alterne travail / pause indéfiniment         */
+  /* ================================================================== */
+
+  var POMO_CHANNEL_ID = 'pomodoro';
+  var POMO_NOTIF_BASE_ID = 3200;
+  var POMO_SCHEDULE_COUNT = 16; /* couvre plusieurs heures de révision d'affilée */
+  var pomoWebTimer = null;
+
+  function ensurePomodoroChannel() {
+    var p = notifPlugin();
+    if (!p || !p.createChannel) return;
+    p.createChannel({
+      id: POMO_CHANNEL_ID,
+      name: 'Pomodoro',
+      description: 'Alerte à chaque bascule travail / pause',
+      importance: 5,
+      visibility: 1,
+      vibration: true,
+    }).catch(function () {});
+  }
+
+  /* Séquence travail/pause/travail/pause… indexée depuis le début de la
+     session : phase paire = travail, impaire = pause. Bornes calculées
+     analytiquement (pas de boucle) pour retomber juste après une longue
+     absence de l'app. */
+  function pomoPhaseBounds(pom, i) {
+    var pairLen = pom.work + pom.brk;
+    var k = Math.floor(i / 2);
+    var isWork = i % 2 === 0;
+    var startMin = isWork ? k * pairLen : k * pairLen + pom.work;
+    var endMin = isWork ? k * pairLen + pom.work : (k + 1) * pairLen;
+    return { phase: isWork ? 'work' : 'break', startMin: startMin, endMin: endMin, session: k + 1 };
+  }
+
+  function pomoState(pom, atMs) {
+    var startMs = new Date(pom.start).getTime();
+    var elapsedMin = Math.max(0, (atMs - startMs) / 60000);
+    var pairLen = pom.work + pom.brk;
+    var k = Math.floor(elapsedMin / pairLen);
+    var withinPair = elapsedMin - k * pairLen;
+    var i = k * 2 + (withinPair < pom.work ? 0 : 1);
+    var b = pomoPhaseBounds(pom, i);
+    var phaseEndMs = startMs + b.endMin * 60000;
+    return { index: i, phase: b.phase, session: b.session, phaseEndMs: phaseEndMs, remainingMs: phaseEndMs - atMs };
+  }
+
+  /* Reprogramme les prochaines bascules à partir de maintenant. Rappelé au
+     démarrage et à chaque retour au premier plan, pour que les alertes
+     restent programmées même si le téléphone reste verrouillé longtemps. */
+  function schedulePomodoroAlarms(pom) {
+    cancelPomodoroAlarms();
+    var startMs = new Date(pom.start).getTime();
+    var cur = pomoState(pom, Date.now());
+    var notifs = [];
+    for (var n = 0; n < POMO_SCHEDULE_COUNT; n++) {
+      var b = pomoPhaseBounds(pom, cur.index + n);
+      var endingWork = b.phase === 'work';
+      notifs.push({
+        id: POMO_NOTIF_BASE_ID + n,
+        title: '🍅 Pomodoro',
+        body: endingWork ? ('Session terminée — pause de ' + pom.brk + ' min !') : 'Pause terminée — au travail !',
+        channelId: POMO_CHANNEL_ID,
+        schedule: { at: new Date(startMs + b.endMin * 60000) },
+      });
+    }
+    var p = notifPlugin();
+    if (p) {
+      p.schedule({ notifications: notifs }).catch(function () {});
+    } else if ('Notification' in window) {
+      clearTimeout(pomoWebTimer);
+      var first = notifs[0];
+      pomoWebTimer = setTimeout(function () {
+        new Notification(first.title, { body: first.body });
+        if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+      }, Math.max(0, first.schedule.at.getTime() - Date.now()));
+    }
+  }
+
+  function cancelPomodoroAlarms() {
+    var p = notifPlugin();
+    if (p) {
+      var ids = [];
+      for (var n = 0; n < POMO_SCHEDULE_COUNT; n++) ids.push({ id: POMO_NOTIF_BASE_ID + n });
+      p.cancel({ notifications: ids }).catch(function () {});
+    }
+    clearTimeout(pomoWebTimer);
+  }
+
+  function startPomodoro(workMin, brkMin) {
+    workMin = Math.min(180, Math.max(1, workMin));
+    brkMin = Math.min(60, Math.max(1, brkMin));
+    askNotifPermission().then(function (ok) {
+      if (!ok) { toast('Notifications refusées par le système'); return; }
+      S.settings.pomodoro = { work: workMin, brk: brkMin };
+      S.pomodoro = { start: new Date().toISOString(), work: workMin, brk: brkMin };
+      save();
+      schedulePomodoroAlarms(S.pomodoro);
+      renderPomodoro();
+      toast('Pomodoro lancé — ' + workMin + ' min de travail');
+    });
+  }
+
+  function stopPomodoro() {
+    S.pomodoro = null;
+    save();
+    cancelPomodoroAlarms();
+    renderPomodoro();
+    toast('Pomodoro arrêté');
+  }
+
+  function renderPomodoro() {
+    var host = $('timer-pomodoro');
+    if (!host) return;
+    var pom = S.pomodoro;
+
+    if (pom) {
+      var st = pomoState(pom, Date.now());
+      var isWork = st.phase === 'work';
+      host.innerHTML =
+        '<div class="fill-head"><div class="timer-head">' +
+        '<span class="timer-badge timer-badge-pomodoro">🍅</span>' +
+        '<h3>' + (isWork ? 'Travail' : 'Pause') + ' — session ' + st.session + '</h3></div>' +
+        '<span class="fill-time">' + fmtRemain(Math.max(0, st.remainingMs)) + '</span></div>' +
+        '<p class="muted small">' + (isWork ? '📚 Concentre-toi' : '☕ Petite pause') + ' — bascule à ' +
+        esc(new Date(st.phaseEndMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })) + '</p>';
+      var stopBtn = el('button', 'ghost danger wide', '✕ Arrêter le pomodoro');
+      stopBtn.onclick = function () { stopPomodoro(); };
+      host.appendChild(stopBtn);
+      return;
+    }
+
+    host.innerHTML = '<div class="timer-head"><span class="timer-badge timer-badge-pomodoro">🍅</span>' +
+      '<h3>Pomodoro (révisions)</h3></div>' +
+      '<p class="muted small">Alterne travail et pause, avec vibration et notification à chaque bascule.</p>';
+
+    var def = S.settings.pomodoro;
+    var row = el('div', 'grid2');
+    var f1 = el('label', 'fld', '<span>Travail (min)</span>');
+    var workInput = el('input');
+    workInput.type = 'number'; workInput.min = '1'; workInput.max = '180'; workInput.inputMode = 'numeric';
+    workInput.value = def.work;
+    f1.appendChild(workInput); row.appendChild(f1);
+    var f2 = el('label', 'fld', '<span>Pause (min)</span>');
+    var brkInput = el('input');
+    brkInput.type = 'number'; brkInput.min = '1'; brkInput.max = '60'; brkInput.inputMode = 'numeric';
+    brkInput.value = def.brk;
+    f2.appendChild(brkInput); row.appendChild(f2);
+    host.appendChild(row);
+
+    var presets = el('div', 'row-btns');
+    [[25, 5], [50, 10], [15, 3]].forEach(function (pr) {
+      var b = el('button', 'ghost small-btn', pr[0] + ' / ' + pr[1]);
+      b.type = 'button';
+      b.onclick = function () { workInput.value = pr[0]; brkInput.value = pr[1]; };
+      presets.appendChild(b);
+    });
+    host.appendChild(presets);
+
+    var startBtn = el('button', 'primary wide', '▶️ Démarrer');
+    startBtn.onclick = function () {
+      var w = parseInt(workInput.value, 10), b = parseInt(brkInput.value, 10);
+      if (!w || w <= 0 || !b || b <= 0) { toast('Indique des durées valides'); return; }
+      startPomodoro(w, b);
+    };
+    host.appendChild(startBtn);
+  }
+
+  /* ================================================================== */
   /* Sauvegarde / export                                                */
   /* ================================================================== */
 
@@ -738,9 +1116,31 @@
 
     if (S.settings.notif) scheduleReminders();
 
-    /* Au retour dans l'app, un jour a pu passer : les échéances bougent. */
+    ensureTimerChannels();
+    /* Les notifications sont déjà programmées côté OS, mais on les
+       reprogramme ici pour couvrir le cas d'une restauration/import
+       ramenant une minuterie en cours sur un appareil où les canaux
+       viennent d'être créés. */
+    TIMERS.forEach(function (def) {
+      var t = S.timers[def.id];
+      if (t && t.end && new Date(t.end) > new Date()) scheduleTimerAlarm(def, new Date(t.end));
+    });
+    setInterval(function () {
+      if (TIMERS.some(function (def) { return S.timers[def.id]; })) renderTimers();
+      if (S.pomodoro) renderPomodoro();
+    }, 30000);
+
+    ensurePomodoroChannel();
+    if (S.pomodoro) schedulePomodoroAlarms(S.pomodoro);
+
+    /* Au retour dans l'app, un jour a pu passer : les échéances bougent, et
+       le pomodoro doit reprogrammer ses prochaines bascules pour couvrir la
+       suite de la session. */
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible') renderAll();
+      if (document.visibilityState === 'visible') {
+        renderAll();
+        if (S.pomodoro) schedulePomodoroAlarms(S.pomodoro);
+      }
     });
   }
 
