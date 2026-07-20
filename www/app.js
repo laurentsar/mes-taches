@@ -12,9 +12,11 @@
   var DEFAULTS = {
     settings: {
       notif: false, notifHour: '08:00', notifLate: true,
-      haAuto: true, backup: true, chargeHours: 5,
+      haAuto: true, backup: true,
+      timerDefaults: { charge: 5, piscine: 40 },
     },
-    tasks: [], lastBackup: null, lastNotifDay: null, charge: null,
+    tasks: [], lastBackup: null, lastNotifDay: null,
+    timers: { charge: null, piscine: null },
   };
 
   var S = load();
@@ -27,9 +29,17 @@
     var out = JSON.parse(JSON.stringify(DEFAULTS));
     Object.keys(out).forEach(function (k) {
       if (s[k] == null) return;
-      if (k === 'settings') Object.keys(s.settings || {}).forEach(function (n) { out.settings[n] = s.settings[n]; });
+      if (k === 'settings') Object.keys(s.settings || {}).forEach(function (n) {
+        if (n === 'timerDefaults') Object.keys(s.settings.timerDefaults || {}).forEach(function (t) {
+          out.settings.timerDefaults[t] = s.settings.timerDefaults[t];
+        });
+        else out.settings[n] = s.settings[n];
+      });
       else out[k] = s[k];
     });
+    /* Migration depuis la version à minuterie unique (recharge voiture). */
+    if (s.settings && s.settings.chargeHours != null) out.settings.timerDefaults.charge = s.settings.chargeHours;
+    if (s.charge) out.timers.charge = s.charge;
     return out;
   }
 
@@ -126,7 +136,7 @@
   /* ================================================================== */
 
   function renderToday() {
-    renderCharge();
+    renderTimers();
     var jour = M.forToday(S.tasks);
     var retard = M.late(S.tasks);
 
@@ -535,160 +545,195 @@
   }
 
   /* ================================================================== */
-  /* Minuterie de recharge de la voiture                                */
+  /* Minuteries (recharge voiture, remplissage piscine…)                */
   /* ================================================================== */
 
-  var CHARGE_NOTIF_ID = 3001;
-  var CHARGE_CHANNEL_ID = 'recharge';
-  var chargeWebTimer = null;
+  /* unit 'h' = durée en heures, 'm' = durée en minutes. adjustStep en
+     minutes, utilisé pour les boutons ±. */
+  var TIMERS = [
+    {
+      id: 'charge', icon: '🔌', title: 'Recharge de la voiture',
+      unit: 'h', unitLabel: 'heures', min: 0.5, max: 24, step: 0.5, presets: [2, 5, 8],
+      adjustStep: 30, notifId: 3001, channelId: 'recharge',
+      notifTitle: '🔌 Recharge terminée', notifBody: 'La voiture a fini de charger.',
+    },
+    {
+      id: 'piscine', icon: '🏊', title: 'Remplissage de la piscine',
+      unit: 'm', unitLabel: 'minutes', min: 5, max: 300, step: 5, presets: [20, 40, 60],
+      adjustStep: 10, notifId: 3002, channelId: 'remplissage',
+      notifTitle: '🏊 Remplissage terminé', notifBody: 'Le remplissage de la piscine est terminé.',
+    },
+  ];
+  var timerWebTimers = {};
 
-  /* Canal Android dédié, avec vibration : sans ça la notification par
+  function unitMs(def) { return def.unit === 'h' ? 3600000 : 60000; }
+
+  /* Canaux Android dédiés, avec vibration : sans ça la notification par
      défaut peut rester silencieuse selon les réglages du téléphone. */
-  function ensureChargeChannel() {
+  function ensureTimerChannels() {
     var p = notifPlugin();
     if (!p || !p.createChannel) return;
-    p.createChannel({
-      id: CHARGE_CHANNEL_ID,
-      name: 'Recharge voiture',
-      description: 'Alerte de fin de recharge de la voiture',
-      importance: 5,
-      visibility: 1,
-      vibration: true,
-    }).catch(function () {});
+    TIMERS.forEach(function (def) {
+      p.createChannel({
+        id: def.channelId,
+        name: def.title,
+        description: 'Alerte de fin — ' + def.title,
+        importance: 5,
+        visibility: 1,
+        vibration: true,
+      }).catch(function () {});
+    });
   }
 
-  function scheduleChargeAlarm(end) {
+  function scheduleTimerAlarm(def, end) {
     var p = notifPlugin();
     if (p) {
-      p.cancel({ notifications: [{ id: CHARGE_NOTIF_ID }] }).catch(function () {});
+      p.cancel({ notifications: [{ id: def.notifId }] }).catch(function () {});
       p.schedule({
         notifications: [{
-          id: CHARGE_NOTIF_ID,
-          title: '🔌 Recharge terminée',
-          body: 'La voiture a fini de charger.',
-          channelId: CHARGE_CHANNEL_ID,
+          id: def.notifId,
+          title: def.notifTitle,
+          body: def.notifBody,
+          channelId: def.channelId,
           schedule: { at: end },
         }],
       }).catch(function () {});
     } else if ('Notification' in window) {
-      clearTimeout(chargeWebTimer);
-      chargeWebTimer = setTimeout(function () {
-        new Notification('🔌 Recharge terminée', { body: 'La voiture a fini de charger.' });
+      clearTimeout(timerWebTimers[def.id]);
+      timerWebTimers[def.id] = setTimeout(function () {
+        new Notification(def.notifTitle, { body: def.notifBody });
         if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
       }, Math.max(0, end.getTime() - Date.now()));
     }
   }
 
-  function cancelChargeAlarm() {
+  function cancelTimerAlarm(def) {
     var p = notifPlugin();
-    if (p) p.cancel({ notifications: [{ id: CHARGE_NOTIF_ID }] }).catch(function () {});
-    clearTimeout(chargeWebTimer);
+    if (p) p.cancel({ notifications: [{ id: def.notifId }] }).catch(function () {});
+    clearTimeout(timerWebTimers[def.id]);
   }
 
-  var CHARGE_MIN_H = 0.5, CHARGE_MAX_H = 24;
-
-  function startCharge(hours) {
-    hours = Math.min(CHARGE_MAX_H, Math.max(CHARGE_MIN_H, hours));
+  function startTimer(def, amount) {
+    amount = Math.min(def.max, Math.max(def.min, amount));
     askNotifPermission().then(function (ok) {
       if (!ok) { toast('Notifications refusées par le système'); return; }
-      S.settings.chargeHours = hours;
-      var end = new Date(Date.now() + hours * 3600000);
-      S.charge = { end: end.toISOString() };
+      S.settings.timerDefaults[def.id] = amount;
+      var end = new Date(Date.now() + amount * unitMs(def));
+      S.timers[def.id] = { end: end.toISOString() };
       save();
-      scheduleChargeAlarm(end);
-      renderCharge();
+      scheduleTimerAlarm(def, end);
+      renderTimers();
       toast('Minuterie lancée — fin à ' + end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
     });
   }
 
-  function cancelCharge() {
-    S.charge = null;
+  function cancelTimer(def) {
+    S.timers[def.id] = null;
     save();
-    cancelChargeAlarm();
-    renderCharge();
+    cancelTimerAlarm(def);
+    renderTimers();
     toast('Minuterie annulée');
   }
 
   /* Ajuste le temps restant d'une minuterie en cours, sans repartir de zéro. */
-  function adjustCharge(minutes) {
-    if (!S.charge || !S.charge.end) return;
-    var end = new Date(new Date(S.charge.end).getTime() + minutes * 60000);
+  function adjustTimer(def, minutes) {
+    var t = S.timers[def.id];
+    if (!t || !t.end) return;
+    var end = new Date(new Date(t.end).getTime() + minutes * 60000);
     var floor = new Date(Date.now() + 60000);
     if (end < floor) end = floor;
-    S.charge.end = end.toISOString();
+    t.end = end.toISOString();
     save();
-    scheduleChargeAlarm(end);
-    renderCharge();
+    scheduleTimerAlarm(def, end);
+    renderTimers();
   }
 
-  function renderCharge() {
-    var host = $('chargeCard');
-    if (!host) return;
+  function fmtRemain(ms) {
+    var h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    return h > 0 ? (h + ' h ' + (m < 10 ? '0' : '') + m) : (m + ' min');
+  }
 
-    if (S.charge && S.charge.end) {
-      var end = new Date(S.charge.end);
+  function renderTimer(def) {
+    var host = $('timer-' + def.id);
+    if (!host) return;
+    var t = S.timers[def.id];
+
+    if (t && t.end) {
+      var end = new Date(t.end);
       var rem = end.getTime() - Date.now();
       if (rem <= 0) {
-        S.charge = null;
+        S.timers[def.id] = null;
         save();
       } else {
-        var h = Math.floor(rem / 3600000);
-        var m = Math.floor((rem % 3600000) / 60000);
         host.innerHTML =
-          '<div class="fill-head"><h3>🔌 Recharge en cours</h3>' +
-          '<span class="fill-time">' + h + ' h ' + (m < 10 ? '0' : '') + m + '</span></div>' +
+          '<div class="fill-head"><h3>' + esc(def.icon) + ' ' + esc(def.title) + ' — en cours</h3>' +
+          '<span class="fill-time">' + fmtRemain(rem) + '</span></div>' +
           '<p class="muted small">Fin prévue à ' +
           esc(end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })) + '</p>';
 
         var adjRow = el('div', 'row-btns');
-        [['−30 min', -30], ['+30 min', 30]].forEach(function (b) {
-          var btn = el('button', 'ghost small-btn', b[0]);
-          btn.type = 'button';
-          btn.onclick = function () { adjustCharge(b[1]); };
-          adjRow.appendChild(btn);
-        });
+        [['−' + def.adjustStep + ' min', -def.adjustStep], ['+' + def.adjustStep + ' min', def.adjustStep]]
+          .forEach(function (b) {
+            var btn = el('button', 'ghost small-btn', b[0]);
+            btn.type = 'button';
+            btn.onclick = function () { adjustTimer(def, b[1]); };
+            adjRow.appendChild(btn);
+          });
         host.appendChild(adjRow);
 
         var cancelBtn = el('button', 'ghost danger wide', '✕ Annuler la minuterie');
-        cancelBtn.onclick = function () { cancelCharge(); };
+        cancelBtn.onclick = function () { cancelTimer(def); };
         host.appendChild(cancelBtn);
         return;
       }
     }
 
-    host.innerHTML = '<h3>🔌 Recharge de la voiture</h3>' +
+    host.innerHTML = '<h3>' + esc(def.icon) + ' ' + esc(def.title) + '</h3>' +
       '<p class="muted small">Choisis la durée : vibration et notification à la fin.</p>';
 
     var durRow = el('span', 'fld-row');
     var durInput = el('input');
     durInput.type = 'number';
-    durInput.min = String(CHARGE_MIN_H);
-    durInput.max = String(CHARGE_MAX_H);
-    durInput.step = '0.5';
+    durInput.min = String(def.min);
+    durInput.max = String(def.max);
+    durInput.step = String(def.step);
     durInput.inputMode = 'decimal';
-    durInput.value = S.settings.chargeHours || 5;
+    durInput.value = S.settings.timerDefaults[def.id];
     durRow.appendChild(durInput);
-    durRow.appendChild(el('span', 'muted small', 'heures'));
+    durRow.appendChild(el('span', 'muted small', def.unitLabel));
     var durFld = el('label', 'fld', '');
     durFld.appendChild(durRow);
     host.appendChild(durFld);
 
     var presets = el('div', 'row-btns');
-    [2, 5, 8].forEach(function (hp) {
-      var b = el('button', 'ghost small-btn', hp + ' h');
+    def.presets.forEach(function (v) {
+      var b = el('button', 'ghost small-btn', v + (def.unit === 'h' ? ' h' : ' min'));
       b.type = 'button';
-      b.onclick = function () { durInput.value = hp; };
+      b.onclick = function () { durInput.value = v; };
       presets.appendChild(b);
     });
     host.appendChild(presets);
 
     var startBtn = el('button', 'primary wide', '▶️ Démarrer');
     startBtn.onclick = function () {
-      var hours = parseFloat(durInput.value);
-      if (!hours || hours <= 0) { toast('Indique une durée valide'); return; }
-      startCharge(hours);
+      var amount = parseFloat(durInput.value);
+      if (!amount || amount <= 0) { toast('Indique une durée valide'); return; }
+      startTimer(def, amount);
     };
     host.appendChild(startBtn);
+  }
+
+  function renderTimers() {
+    var host = $('timersHost');
+    if (!host) return;
+    if (!host.childElementCount) {
+      TIMERS.forEach(function (def) {
+        var card = el('div', 'card timer-card');
+        card.id = 'timer-' + def.id;
+        host.appendChild(card);
+      });
+    }
+    TIMERS.forEach(renderTimer);
   }
 
   /* ================================================================== */
@@ -896,14 +941,18 @@
 
     if (S.settings.notif) scheduleReminders();
 
-    ensureChargeChannel();
-    /* La notification est déjà programmée côté OS, mais on la reprogramme
-       ici pour couvrir le cas d'une restauration/import ramenant une
-       recharge en cours sur un appareil où le canal vient d'être créé. */
-    if (S.charge && S.charge.end && new Date(S.charge.end) > new Date()) {
-      scheduleChargeAlarm(new Date(S.charge.end));
-    }
-    setInterval(function () { if (S.charge) renderCharge(); }, 30000);
+    ensureTimerChannels();
+    /* Les notifications sont déjà programmées côté OS, mais on les
+       reprogramme ici pour couvrir le cas d'une restauration/import
+       ramenant une minuterie en cours sur un appareil où les canaux
+       viennent d'être créés. */
+    TIMERS.forEach(function (def) {
+      var t = S.timers[def.id];
+      if (t && t.end && new Date(t.end) > new Date()) scheduleTimerAlarm(def, new Date(t.end));
+    });
+    setInterval(function () {
+      if (TIMERS.some(function (def) { return S.timers[def.id]; })) renderTimers();
+    }, 30000);
 
     /* Au retour dans l'app, un jour a pu passer : les échéances bougent. */
     document.addEventListener('visibilitychange', function () {

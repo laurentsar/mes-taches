@@ -1,4 +1,4 @@
 {
   "version": "1.1.0",
-  "notes": "Ajout d'une minuterie de recharge de la voiture (durée réglable), avec vibration et notification à la fin."
+  "notes": "Ajout d'une minuterie de remplissage de la piscine (40 min par défaut), en plus de la recharge voiture. Durée réglable pour les deux."
 }
