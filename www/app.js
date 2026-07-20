@@ -666,7 +666,9 @@
         save();
       } else {
         host.innerHTML =
-          '<div class="fill-head"><h3>' + esc(def.icon) + ' ' + esc(def.title) + ' — en cours</h3>' +
+          '<div class="fill-head"><div class="timer-head">' +
+          '<span class="timer-badge timer-badge-' + esc(def.id) + '">' + esc(def.icon) + '</span>' +
+          '<h3>' + esc(def.title) + ' — en cours</h3></div>' +
           '<span class="fill-time">' + fmtRemain(rem) + '</span></div>' +
           '<p class="muted small">Fin prévue à ' +
           esc(end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })) + '</p>';
@@ -688,7 +690,9 @@
       }
     }
 
-    host.innerHTML = '<h3>' + esc(def.icon) + ' ' + esc(def.title) + '</h3>' +
+    host.innerHTML = '<div class="timer-head">' +
+      '<span class="timer-badge timer-badge-' + esc(def.id) + '">' + esc(def.icon) + '</span>' +
+      '<h3>' + esc(def.title) + '</h3></div>' +
       '<p class="muted small">Choisis la durée : vibration et notification à la fin.</p>';
 
     var durRow = el('span', 'fld-row');
