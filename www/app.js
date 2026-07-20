@@ -12,7 +12,7 @@
   var DEFAULTS = {
     settings: {
       notif: false, notifHour: '08:00', notifLate: true,
-      haAuto: true, backup: true,
+      haAuto: true, backup: true, chargeHours: 5,
     },
     tasks: [], lastBackup: null, lastNotifDay: null, charge: null,
   };
@@ -585,9 +585,13 @@
     clearTimeout(chargeWebTimer);
   }
 
+  var CHARGE_MIN_H = 0.5, CHARGE_MAX_H = 24;
+
   function startCharge(hours) {
+    hours = Math.min(CHARGE_MAX_H, Math.max(CHARGE_MIN_H, hours));
     askNotifPermission().then(function (ok) {
       if (!ok) { toast('Notifications refusées par le système'); return; }
+      S.settings.chargeHours = hours;
       var end = new Date(Date.now() + hours * 3600000);
       S.charge = { end: end.toISOString() };
       save();
@@ -603,6 +607,18 @@
     cancelChargeAlarm();
     renderCharge();
     toast('Minuterie annulée');
+  }
+
+  /* Ajuste le temps restant d'une minuterie en cours, sans repartir de zéro. */
+  function adjustCharge(minutes) {
+    if (!S.charge || !S.charge.end) return;
+    var end = new Date(new Date(S.charge.end).getTime() + minutes * 60000);
+    var floor = new Date(Date.now() + 60000);
+    if (end < floor) end = floor;
+    S.charge.end = end.toISOString();
+    save();
+    scheduleChargeAlarm(end);
+    renderCharge();
   }
 
   function renderCharge() {
@@ -623,6 +639,16 @@
           '<span class="fill-time">' + h + ' h ' + (m < 10 ? '0' : '') + m + '</span></div>' +
           '<p class="muted small">Fin prévue à ' +
           esc(end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })) + '</p>';
+
+        var adjRow = el('div', 'row-btns');
+        [['−30 min', -30], ['+30 min', 30]].forEach(function (b) {
+          var btn = el('button', 'ghost small-btn', b[0]);
+          btn.type = 'button';
+          btn.onclick = function () { adjustCharge(b[1]); };
+          adjRow.appendChild(btn);
+        });
+        host.appendChild(adjRow);
+
         var cancelBtn = el('button', 'ghost danger wide', '✕ Annuler la minuterie');
         cancelBtn.onclick = function () { cancelCharge(); };
         host.appendChild(cancelBtn);
@@ -631,9 +657,37 @@
     }
 
     host.innerHTML = '<h3>🔌 Recharge de la voiture</h3>' +
-      '<p class="muted small">Lance une minuterie de 5 heures : vibration et notification à la fin.</p>';
-    var startBtn = el('button', 'primary wide', '▶️ Démarrer (5 h)');
-    startBtn.onclick = function () { startCharge(5); };
+      '<p class="muted small">Choisis la durée : vibration et notification à la fin.</p>';
+
+    var durRow = el('span', 'fld-row');
+    var durInput = el('input');
+    durInput.type = 'number';
+    durInput.min = String(CHARGE_MIN_H);
+    durInput.max = String(CHARGE_MAX_H);
+    durInput.step = '0.5';
+    durInput.inputMode = 'decimal';
+    durInput.value = S.settings.chargeHours || 5;
+    durRow.appendChild(durInput);
+    durRow.appendChild(el('span', 'muted small', 'heures'));
+    var durFld = el('label', 'fld', '');
+    durFld.appendChild(durRow);
+    host.appendChild(durFld);
+
+    var presets = el('div', 'row-btns');
+    [2, 5, 8].forEach(function (hp) {
+      var b = el('button', 'ghost small-btn', hp + ' h');
+      b.type = 'button';
+      b.onclick = function () { durInput.value = hp; };
+      presets.appendChild(b);
+    });
+    host.appendChild(presets);
+
+    var startBtn = el('button', 'primary wide', '▶️ Démarrer');
+    startBtn.onclick = function () {
+      var hours = parseFloat(durInput.value);
+      if (!hours || hours <= 0) { toast('Indique une durée valide'); return; }
+      startCharge(hours);
+    };
     host.appendChild(startBtn);
   }
 
