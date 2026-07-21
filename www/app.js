@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.1.0';
+  var APP_VERSION = '1.1.2';
   window.APP_VERSION = APP_VERSION;
 
   var KEY = 'taches.state';
