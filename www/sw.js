@@ -1,6 +1,6 @@
 /* Service worker : coquille hors ligne. Le CACHE porte la version pour
    qu'une nouvelle release invalide l'ancienne coquille. */
-const CACHE = 'taches-app-v1.0.0';
+const CACHE = 'taches-app-v1.1.1';
 const SHELL = ['./', 'index.html', 'app.js', 'styles.css', 'js/model.js', 'js/ha.js',
                'update-check.js', 'manifest.webmanifest',
                'img/icon-192.png', 'img/icon-512.png'];

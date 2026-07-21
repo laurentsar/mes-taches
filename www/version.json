@@ -1,4 +1,4 @@
 {
-  "version": "1.1.0",
-  "notes": "Ajout d'un Pomodoro pour les révisions (travail/pause alternés, vibration et notification à chaque bascule), en plus des minuteries de recharge voiture et de remplissage piscine."
+  "version": "1.1.1",
+  "notes": "Correctif : la sauvegarde vers Home Assistant échouait avec « Cleartext HTTP traffic not permitted » — l'autorisation HTTP local manquait dans l'APK."
 }
