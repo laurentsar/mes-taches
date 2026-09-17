@@ -99,4 +99,5 @@ jobs:
           else
             gh release create "v${VERSION}" "$APK" --title "Mes Tâches v${VERSION}" --notes "Build automatique v${VERSION}"
           fi
+          gh release edit "v${VERSION}" --draft=false
 
