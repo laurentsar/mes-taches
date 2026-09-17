@@ -89,12 +89,14 @@ jobs:
 
       - name: Create / update GitHub Release
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: "Mes Tâches v${{ steps.version.outputs.version }}"
-          files: mes-taches-${{ steps.version.outputs.version }}.apk
-          fail_on_unmatched_files: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          APK="mes-taches-${VERSION}.apk"
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" "$APK" --clobber
+          else
+            gh release create "v${VERSION}" "$APK" --title "Mes Tâches v${VERSION}" --notes "Build automatique v${VERSION}"
+          fi
 
